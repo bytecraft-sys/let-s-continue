@@ -1,4 +1,4 @@
-package com.example.letscontinue
+package com.example.letscontinue.ui.theme
 
 import com.google.firebase.Timestamp
 
@@ -38,10 +38,16 @@ data class ChatItem(
 data class User(
     val uid: String="",
     val name: String="",
-   val email: String=""
+   val email: String="",
+    val photoUrl: String? = null,
+    val lastMessage: String = "",
+    val lastMessageTime: Timestamp?=null
 )
 data class Message(
+    val id: String="",
     val senderId: String = "",
     val text: String = "",
-    val timestamp: Timestamp= Timestamp.now()
+    val timestamp: Timestamp= Timestamp.now(),
+    val status: String = "read",
+    val deletedForEveryone: Boolean=false
 )

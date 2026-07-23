@@ -1,4 +1,4 @@
-package com.example.letscontinue.ui.theme.chatlist
+package com.example.letscontinue.screen
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
@@ -40,21 +41,34 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.letscontinue.BottomNavigationBar
-import com.example.letscontinue.ChatListItem
-import com.example.letscontinue.FilterChips
-import com.example.letscontinue.User
+import com.example.letscontinue.NewChatDialog
+import com.example.letscontinue.saveTokenToFirestore
+import com.example.letscontinue.ui.theme.User
+import com.example.letscontinue.ui.theme.chatlist.BottomNavigationBar
+import com.example.letscontinue.ui.theme.chatlist.ChatListItem
+import com.example.letscontinue.ui.theme.chatlist.FilterChips
+import com.example.letscontinue.ui.theme.chatlist.TopSection
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 
 @Composable
 fun ChatListSr(
     onLogout: () -> Unit,
-    onOpenChat: (String) -> Unit
+    onOpenChat: (String) -> Unit,
+    onQrClick: () -> Unit,
+    onToggleTheme: () -> Unit
+
 ) {
     var userList by remember { mutableStateOf<List<User>>(emptyList()) }
     var myReferralCode by remember { mutableStateOf("") }
     var searchQuery by remember { mutableStateOf("") }
+    var showNewChatDialog by remember { mutableStateOf(false) }
+
+    val filteredUsers = remember(userList, searchQuery) {
+        if (searchQuery.isBlank()) userList
+        else userList.filter { it.name.contains(searchQuery, ignoreCase = true) }
+    }
+
 
     DisposableEffect(Unit) {
         val auth = FirebaseAuth.getInstance()
@@ -68,57 +82,98 @@ fun ChatListSr(
             .document(currentUid)
             .addSnapshotListener { myDoc, _ ->
                 myReferralCode = myDoc?.getString("referralCode") ?: ""
+            }
 
-                // Also load the person who referred ME
-                val referredByUid = myDoc?.getString("referredBy")
-                if (referredByUid != null) {
-                    firestore.collection("users")
-                        .document(referredByUid)
-                        .get()
-                        .addOnSuccessListener { doc ->
-                            val referrer = User(
-                                uid = doc.id,
-                                email = doc.getString("email") ?: "",
-                                name = doc.getString("name") ?: "User",
-                            )
-
-                            userList = (userList+referrer).distinctBy { it.uid }
+                //listener 2
+                val connectionsListener = firestore.collection("users")
+                    .document(currentUid)
+                    .collection("connections")
+                    .addSnapshotListener { snapshots, error ->
+                        if (error != null) return@addSnapshotListener
+                        snapshots?.documents?.forEach { connDoc->
+                            val uid = connDoc.getString("uid") ?: return@forEach
+                            firestore.collection("users").document(uid)
+                                .addSnapshotListener { userDoc, _ ->
+                                    if (userDoc == null) return@addSnapshotListener
+                                    val user = User(
+                                        uid = userDoc.id,
+                                        email = userDoc.getString("email") ?: "",
+                                        name = userDoc.getString("name") ?: "User",
+                                        photoUrl = userDoc.getString("photoUrl")
+                                    )
+                                    val chatId = getChatId(currentUid, uid)
+                                    firestore.collection("chats").document(chatId)
+                                        .addSnapshotListener { chatDoc, _ ->
+                                            val lastMessage = chatDoc?.getString("lastMessage") ?: ""
+                                            val lastTime = chatDoc?.getTimestamp("lastTimestamp")
+                                            userList =(userList+user.copy(
+                                                lastMessage=lastMessage,
+                                                lastMessageTime= lastTime))
+                                                .distinctBy {it.uid }
+                                                .sortedByDescending { it.lastMessageTime?.seconds?:0 }
+                                        }
+                                }
                         }
-                }
-            }
-        val usersListener = firestore.collection("users")
-            .whereEqualTo("referredBy", currentUid)
-            .addSnapshotListener { documents, error ->
-                if (error != null) return@addSnapshotListener
-                val referred = documents?.map { doc ->
-                    User(
-                        uid = doc.id,
-                        email = doc.getString("email") ?: "",
-                        name = doc.getString("name") ?: "User"
-                    )
-                } ?: emptyList()
+                    }
 
-                // Merge both lists without duplicates
-                userList = (userList + referred).distinctBy { it.uid }
+                // Listener 3 - referral-based connections (backward compat)
+                val referralListener = firestore.collection("users")
+                    .whereEqualTo("referredBy", currentUid)
+                    .addSnapshotListener { documents, _ ->
+                        documents?.forEach { doc ->
+                            val uid = doc.id
+                            val user = User(
+                                uid = uid,
+                                name = doc.getString("name") ?: "User",
+                                email = doc.getString("email") ?: "",
+                                photoUrl = doc.getString("photoUrl")
+                            )
+                            val chatId = getChatId(currentUid, uid)
+                            firestore.collection("chats").document(chatId)
+                                .addSnapshotListener { chatDoc, _ ->
+                                    val lastMessage = chatDoc?.getString("lastMessage") ?: ""
+                                    val lastTime = chatDoc?.getTimestamp("lastTimestamp")
+                                    userList = (userList + user.copy(
+                                        lastMessage = lastMessage,
+                                        lastMessageTime = lastTime
+                                    )).distinctBy { it.uid }
+                                        .sortedByDescending { it.lastMessageTime?.seconds ?: 0 }
+                                }
+                        }
+                    }
+
+        // Save FCM token when user opens app
+        com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { token ->
+                saveTokenToFirestore(token)
             }
+
 
         onDispose {
             profileListener.remove()
-            usersListener.remove()
+            connectionsListener.remove()
+            referralListener.remove()
         }
 
     }
-
-    val filteredUsers = remember(userList, searchQuery) {
-        if (searchQuery.isBlank()) userList
-        else userList.filter { it.name.contains(searchQuery, ignoreCase = true) }
+    // New chat dialog
+    if (showNewChatDialog) {
+        NewChatDialog(
+            onDismiss = { showNewChatDialog = false },
+            onChatStarted = { userId ->
+                showNewChatDialog = false
+                onOpenChat(userId)
+            }
+        )
     }
+
+
 
     Scaffold(
         floatingActionButton = {
             FloatingActionButton(
-                onClick = { /* TODO: Show user search dialog to start new chat */ },
-                containerColor = Color(0xFF4A00E0)
+                onClick = { showNewChatDialog = true},
+                containerColor = MaterialTheme.colorScheme.primary
             ) {
                 Icon(Icons.Default.Add, contentDescription = "New Chat", tint = Color.White)
             }
@@ -131,26 +186,18 @@ fun ChatListSr(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFFF8F7FF))
+                .background(MaterialTheme.colorScheme.background)
                 .padding(padding)
         ) {
             // Top bar with gradient header
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0xFF4A00E0), Color(0xFF8E2DE2))
-                        )
-                    )
-                    .statusBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 16.dp)
-            ) {
+
                 TopSection(
                     onLogout = onLogout,
-                    referralCode = myReferralCode
+                    referralCode = myReferralCode,
+                    onQrClick = onQrClick,
+                    onToggleTheme = onToggleTheme
                 )
-            }
+
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -164,7 +211,7 @@ fun ChatListSr(
                     shape = RoundedCornerShape(50),
                     singleLine = true,
                     leadingIcon = {
-                        Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF4A00E0))
+                        Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     },
                     trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
@@ -174,10 +221,10 @@ fun ChatListSr(
                         }
                     },
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color(0xFF4A00E0),
-                        unfocusedBorderColor = Color(0xFFE0E0E0),
-                        focusedContainerColor = Color.White,
-                        unfocusedContainerColor = Color.White
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor =MaterialTheme.colorScheme.outline,
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
                     )
                 )
 
@@ -227,4 +274,13 @@ fun ChatListSr(
             }
         }
     }
+}
+
+fun saveToFirestore(field: String, value: String) {
+    val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return
+    FirebaseFirestore.getInstance().collection("users").document(uid).update(field, value)
+}
+
+fun getChatId(uid1: String, uid2: String): String {
+    return if (uid1 < uid2) "${uid1}_${uid2}" else "${uid2}_${uid1}"
 }
